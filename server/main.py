@@ -304,6 +304,254 @@ def get_monthly_trends():
     result.sort(key=lambda x: x['month'])
     return result
 
+
+# Restocking feature: per-category lead times (days) used to compute expected delivery
+CATEGORY_LEAD_TIMES = {
+    'Circuit Boards': 7,
+    'Sensors': 5,
+    'Actuators': 10,
+    'Controllers': 12,
+    'Power Supplies': 8,
+}
+
+# Fallback cost/category for demand SKUs that don't exist in inventory.json.
+# Most demand_forecasts.json SKUs (WDG-*, BRG-*, etc.) are not in inventory,
+# so we infer category from SKU prefix and assign a mock unit cost.
+DEMAND_SKU_FALLBACK = {
+    'WDG': {'category': 'Actuators', 'unit_cost': 42.50},
+    'BRG': {'category': 'Actuators', 'unit_cost': 18.75},
+    'GSK': {'category': 'Sensors', 'unit_cost': 12.30},
+    'MTR': {'category': 'Actuators', 'unit_cost': 95.00},
+    'FLT': {'category': 'Sensors', 'unit_cost': 28.40},
+    'VLV': {'category': 'Actuators', 'unit_cost': 67.80},
+    'SNR': {'category': 'Sensors', 'unit_cost': 34.20},
+    'CTL': {'category': 'Controllers', 'unit_cost': 120.00},
+}
+
+def _lookup_demand_item_cost(sku: str):
+    """Resolve (category, unit_cost) for a demand SKU, preferring inventory then falling back to prefix map."""
+    inv_match = next((i for i in inventory_items if i['sku'] == sku), None)
+    if inv_match:
+        return inv_match['category'], inv_match['unit_cost']
+    prefix = sku.split('-')[0]
+    fallback = DEMAND_SKU_FALLBACK.get(prefix, {'category': 'Actuators', 'unit_cost': 45.00})
+    return fallback['category'], fallback['unit_cost']
+
+
+class RestockRecommendation(BaseModel):
+    sku: str
+    name: str
+    category: str
+    shortfall: int
+    recommended_quantity: int
+    unit_cost: float
+    line_total: float
+    lead_time_days: int
+
+
+class RestockRecommendationResponse(BaseModel):
+    budget: float
+    recommendations: List[RestockRecommendation]
+    total_cost: float
+    remaining_budget: float
+
+
+class RestockOrderItem(BaseModel):
+    sku: str
+    name: str
+    quantity: int
+    unit_price: float
+    category: str
+    lead_time_days: int
+
+
+class PlaceRestockOrderRequest(BaseModel):
+    items: List[RestockOrderItem]
+
+
+@app.get("/api/restocking/recommendations", response_model=RestockRecommendationResponse)
+def get_restocking_recommendations(budget: float):
+    """Recommend items to restock within a budget, prioritized by largest demand shortfall."""
+    candidates = []
+    for d in demand_forecasts:
+        shortfall = d['forecasted_demand'] - d['current_demand']
+        if shortfall <= 0:
+            continue
+        category, unit_cost = _lookup_demand_item_cost(d['item_sku'])
+        candidates.append({
+            'sku': d['item_sku'],
+            'name': d['item_name'],
+            'category': category,
+            'shortfall': shortfall,
+            'unit_cost': unit_cost,
+            'lead_time_days': CATEGORY_LEAD_TIMES.get(category, 7),
+        })
+
+    # Largest shortfall first — greedy fill until budget exhausted
+    candidates.sort(key=lambda c: c['shortfall'], reverse=True)
+
+    recommendations = []
+    remaining = budget
+    for c in candidates:
+        full_cost = c['shortfall'] * c['unit_cost']
+        if full_cost <= remaining:
+            qty = c['shortfall']
+            line_total = full_cost
+        elif remaining >= c['unit_cost']:
+            # Partial fill: buy as many units as remaining budget allows
+            qty = int(remaining // c['unit_cost'])
+            line_total = qty * c['unit_cost']
+        else:
+            continue
+        recommendations.append({
+            **c,
+            'recommended_quantity': qty,
+            'line_total': round(line_total, 2),
+        })
+        remaining -= line_total
+
+    total_cost = round(sum(r['line_total'] for r in recommendations), 2)
+    return {
+        'budget': budget,
+        'recommendations': recommendations,
+        'total_cost': total_cost,
+        'remaining_budget': round(budget - total_cost, 2),
+    }
+
+
+@app.post("/api/restocking/order", response_model=Order)
+def place_restocking_order(req: PlaceRestockOrderRequest):
+    """Create a new Order from restocking items and append it to the in-memory orders list."""
+    if not req.items:
+        raise HTTPException(status_code=400, detail="At least one item is required")
+
+    from datetime import datetime, timedelta
+
+    # Next ID continues the existing sequence; order_number uses R-prefix to visually distinguish restocks
+    next_id = max((int(o['id']) for o in orders if o['id'].isdigit()), default=0) + 1
+    restock_count = sum(1 for o in orders if o.get('status') == 'Restocking') + 1
+
+    max_lead = max(i.lead_time_days for i in req.items)
+    now = datetime.now()
+
+    order_items = [
+        {'sku': i.sku, 'name': i.name, 'quantity': i.quantity, 'unit_price': i.unit_price}
+        for i in req.items
+    ]
+    total_value = round(sum(i.quantity * i.unit_price for i in req.items), 2)
+
+    new_order = {
+        'id': str(next_id),
+        'order_number': f'ORD-2025-R{restock_count:03d}',
+        'customer': 'Internal Restock',
+        'items': order_items,
+        'status': 'Restocking',
+        'warehouse': None,
+        'category': req.items[0].category,
+        'order_date': now.strftime('%Y-%m-%dT%H:%M:%S'),
+        'expected_delivery': (now + timedelta(days=max_lead)).strftime('%Y-%m-%dT%H:%M:%S'),
+        'total_value': total_value,
+        'actual_delivery': None,
+    }
+
+    orders.append(new_order)
+    return new_order
+
+
+
+# --- Tasks endpoints (frontend was calling these but they didn't exist — 404 on every page load) ---
+
+class Task(BaseModel):
+    id: str
+    title: str
+    priority: str
+    dueDate: str
+    status: str
+
+
+class CreateTaskRequest(BaseModel):
+    title: str
+    priority: str
+    dueDate: str
+
+
+# In-memory task store (session-scoped, like orders)
+_tasks: list = []
+_next_task_id = 1
+
+
+@app.get("/api/tasks", response_model=List[Task])
+def get_tasks():
+    """Get all tasks."""
+    return _tasks
+
+
+@app.post("/api/tasks", response_model=Task)
+def create_task(req: CreateTaskRequest):
+    """Create a new task with status='pending'."""
+    global _next_task_id
+    task = {
+        'id': f't{_next_task_id}',
+        'title': req.title,
+        'priority': req.priority,
+        'dueDate': req.dueDate,
+        'status': 'pending',
+    }
+    _next_task_id += 1
+    _tasks.append(task)
+    return task
+
+
+@app.delete("/api/tasks/{task_id}")
+def delete_task(task_id: str):
+    """Delete a task by id."""
+    idx = next((i for i, t in enumerate(_tasks) if t['id'] == task_id), None)
+    if idx is None:
+        raise HTTPException(status_code=404, detail="Task not found")
+    _tasks.pop(idx)
+    return {"deleted": task_id}
+
+
+@app.patch("/api/tasks/{task_id}", response_model=Task)
+def toggle_task(task_id: str):
+    """Toggle a task between pending and completed."""
+    task = next((t for t in _tasks if t['id'] == task_id), None)
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+    task['status'] = 'completed' if task['status'] == 'pending' else 'pending'
+    return task
+
+
+# --- Purchase order endpoints (models + data existed, api.js called them, but no routes) ---
+
+@app.get("/api/purchase-orders/{backlog_item_id}", response_model=PurchaseOrder)
+def get_purchase_order_by_backlog_item(backlog_item_id: str):
+    """Get the purchase order for a given backlog item."""
+    po = next((p for p in purchase_orders if p['backlog_item_id'] == backlog_item_id), None)
+    if not po:
+        raise HTTPException(status_code=404, detail="No purchase order found for this backlog item")
+    return po
+
+
+@app.post("/api/purchase-orders", response_model=PurchaseOrder)
+def create_purchase_order(req: CreatePurchaseOrderRequest):
+    """Create a new purchase order for a backlog item."""
+    from datetime import datetime
+    new_po = {
+        'id': f'PO-{len(purchase_orders) + 1:04d}',
+        'backlog_item_id': req.backlog_item_id,
+        'supplier_name': req.supplier_name,
+        'quantity': req.quantity,
+        'unit_cost': req.unit_cost,
+        'expected_delivery_date': req.expected_delivery_date,
+        'status': 'Ordered',
+        'created_date': datetime.now().strftime('%Y-%m-%d'),
+        'notes': req.notes,
+    }
+    purchase_orders.append(new_po)
+    return new_po
+
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8001)
