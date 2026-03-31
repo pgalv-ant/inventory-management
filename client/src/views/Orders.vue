@@ -27,9 +27,39 @@
         </div>
       </div>
 
+      <div v-if="restockingOrders.length > 0" class="card">
+        <div class="card-header">
+          <h3 class="card-title">Submitted Restocking Orders ({{ restockingOrders.length }})</h3>
+        </div>
+        <div class="table-container">
+          <table class="orders-table restocking-table">
+            <thead>
+              <tr>
+                <th class="col-order-number">Order #</th>
+                <th class="col-items">Items</th>
+                <th class="col-date">Order Date</th>
+                <th class="col-date">Expected Delivery</th>
+                <th class="col-lead">Lead Time</th>
+                <th class="col-value">Total Value</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="order in restockingOrders" :key="order.id">
+                <td class="col-order-number"><strong>{{ order.order_number }}</strong></td>
+                <td class="col-items">{{ order.items.length }} item{{ order.items.length !== 1 ? 's' : '' }}</td>
+                <td class="col-date">{{ formatDate(order.order_date) }}</td>
+                <td class="col-date">{{ formatDate(order.expected_delivery) }}</td>
+                <td class="col-lead">{{ computeLeadTime(order.order_date, order.expected_delivery) }} days</td>
+                <td class="col-value"><strong>{{ currencySymbol }}{{ order.total_value.toLocaleString() }}</strong></td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
       <div class="card">
         <div class="card-header">
-          <h3 class="card-title">{{ t('orders.allOrders') }} ({{ orders.length }})</h3>
+          <h3 class="card-title">{{ t('orders.allOrders') }} ({{ regularOrders.length }})</h3>
         </div>
         <div class="table-container">
           <table class="orders-table">
@@ -45,7 +75,7 @@
               </tr>
             </thead>
             <tbody>
-              <tr v-for="order in orders" :key="order.id">
+              <tr v-for="order in regularOrders" :key="order.id">
                 <td class="col-order-number"><strong>{{ order.order_number }}</strong></td>
                 <td class="col-customer">{{ translateCustomerName(order.customer) }}</td>
                 <td class="col-items">
@@ -105,6 +135,14 @@ export default {
       getCurrentFilters
     } = useFilters()
 
+    const restockingOrders = computed(() => {
+      return orders.value.filter(o => o.status === 'Restocking')
+    })
+
+    const regularOrders = computed(() => {
+      return orders.value.filter(o => o.status !== 'Restocking')
+    })
+
     const loadOrders = async () => {
       try {
         loading.value = true
@@ -153,6 +191,13 @@ export default {
       })
     }
 
+    const computeLeadTime = (orderDate, expectedDelivery) => {
+      const ordered = new Date(orderDate)
+      const expected = new Date(expectedDelivery)
+      if (isNaN(ordered.getTime()) || isNaN(expected.getTime())) return '—'
+      return Math.round((expected - ordered) / 86400000)
+    }
+
     onMounted(loadOrders)
 
     return {
@@ -160,9 +205,12 @@ export default {
       loading,
       error,
       orders,
+      restockingOrders,
+      regularOrders,
       getOrdersByStatus,
       getOrderStatusClass,
       formatDate,
+      computeLeadTime,
       currencySymbol,
       translateProductName,
       translateCustomerName
@@ -203,6 +251,10 @@ export default {
   width: 120px;
 }
 
+.col-lead {
+  width: 110px;
+}
+
 /* Items details styling */
 .items-details {
   position: relative;
@@ -222,7 +274,7 @@ export default {
 }
 
 .items-summary::before {
-  content: '▶';
+  content: '\25B6';
   display: inline-block;
   margin-right: 0.375rem;
   font-size: 0.75rem;
