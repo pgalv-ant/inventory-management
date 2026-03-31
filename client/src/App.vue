@@ -172,29 +172,34 @@ export default {
 
 <style>
 :root {
-  --color-bg: #f8fafc;
-  --color-surface: #ffffff;
-  --color-surface-hover: #f1f5f9;
-  --color-text: #0f172a;
-  --color-text-body: #1e293b;
-  --color-text-secondary: #64748b;
-  --color-border: #e2e8f0;
-  --color-border-hover: #cbd5e1;
-  --color-link: #2563eb;
-  --color-link-bg: #eff6ff;
+  --color-bg: #F0EEE6;
+  --color-surface: #FFFFFF;
+  --color-surface-hover: #FAF8F3;
+  --color-text: #191919;
+  --color-text-body: #2D2D2A;
+  --color-text-secondary: #87715E;
+  --color-border: #E5DFD3;
+  --color-border-hover: #D4C5B0;
+  --color-link: #CC785C;
+  --color-link-bg: #F5E6DF;
+  --font-serif: Georgia, 'Times New Roman', serif;
 }
 
 html.dark {
-  --color-bg: #0f172a;
-  --color-surface: #1e293b;
-  --color-surface-hover: #334155;
-  --color-text: #f1f5f9;
-  --color-text-body: #e2e8f0;
-  --color-text-secondary: #94a3b8;
-  --color-border: #334155;
-  --color-border-hover: #475569;
-  --color-link: #60a5fa;
-  --color-link-bg: #1e3a8a;
+  --color-bg: #1C1917;
+  --color-surface: #292524;
+  --color-surface-hover: #3B3633;
+  --color-text: #F5F1EC;
+  --color-text-body: #E7E0D8;
+  --color-text-secondary: #A8998A;
+  --color-border: #3B3633;
+  --color-border-hover: #524A44;
+  --color-link: #E09B7D;
+  --color-link-bg: #3D2E28;
+}
+
+h1, h2, h3, .page-header h2, .stat-value, .kpi-value {
+  font-family: var(--font-serif);
 }
 
 * {
